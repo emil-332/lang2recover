@@ -9,7 +9,8 @@ dependencies = [
     "gymnasium",
     "numpy",
     "imageio",
-    "imageio-ffmpeg"
+    "imageio-ffmpeg",
+    "matplotlib"
 ]
 
 [tool.setuptools.packages.find]
