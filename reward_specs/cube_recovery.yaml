@@ -1,0 +1,24 @@
+name: cube_recovery_to_known_good_state
+
+natural_language_objective: >
+  Move the displaced cube back into the known-good recovery zone.
+  The reward should encourage progress toward the recovery zone, penalize
+  unnecessary action magnitude, give a success bonus when the cube is recovered,
+  and penalize moving the cube outside the workspace.
+
+available_state_variables:
+  - cube_xy
+  - recovery_center_xy
+  - goal_xy
+  - action
+  - distance_to_recovery
+  - previous_distance_to_recovery
+  - is_recovered
+  - is_out_of_bounds
+
+reward_terms:
+  distance_weight: 3.0
+  progress_weight: 8.0
+  success_bonus: 10.0
+  action_penalty_weight: 0.02
+  out_of_bounds_penalty: 5.0

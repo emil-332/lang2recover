@@ -6,13 +6,19 @@ from pathlib import Path
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 
-from lang2recover.envs.recovery_2d_env import Recovery2DEnv
+from lang2recover.envs.recovery_2d_env import Recovery2DConfig, Recovery2DEnv
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--timesteps", type=int, default=50_000)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--reward-mode",
+        type=str,
+        default="manual_dense",
+        choices=["manual_dense", "language_generated"],
+    )
     return parser.parse_args()
 
 
@@ -20,12 +26,13 @@ def main() -> None:
     args = parse_args()
 
     checkpoint_dir = Path("checkpoints")
-    log_dir = Path("results/ppo_recovery_2d")
+    log_dir = Path(f"results/ppo_recovery_2d/{args.reward_mode}")
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    env = Monitor(Recovery2DEnv(), filename=str(log_dir / "monitor.csv"))
+    config = Recovery2DConfig(reward_mode=args.reward_mode)
+    env = Monitor(Recovery2DEnv(config=config), filename=str(log_dir / "monitor.csv"))
 
     model = PPO(
         policy="MlpPolicy",
@@ -44,12 +51,18 @@ def main() -> None:
     print("\nTraining PPO recovery policy.")
     print(f"Timesteps: {args.timesteps}")
     print("Environment: Recovery2DEnv")
+    print(f"Reward mode: {args.reward_mode}")
     print("Goal: move displaced cube back into recovery zone.\n")
 
     model.learn(total_timesteps=args.timesteps)
 
-    model_path = checkpoint_dir / "recovery_ppo_2d.zip"
+    model_path = checkpoint_dir / f"recovery_ppo_2d_{args.reward_mode}.zip"
     model.save(model_path)
+
+    if args.reward_mode == "manual_dense":
+        legacy_path = checkpoint_dir / "recovery_ppo_2d.zip"
+        model.save(legacy_path)
+        print(f"Saved legacy checkpoint to: {legacy_path}")
 
     env.close()
 

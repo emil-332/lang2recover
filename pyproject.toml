@@ -12,7 +12,8 @@ dependencies = [
     "imageio-ffmpeg",
     "matplotlib",
     "stable-baselines3",
-    "tensorboard"
+    "tensorboard",
+    "pyyaml"
 ]
 
 [tool.setuptools.packages.find]

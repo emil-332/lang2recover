@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+from types import ModuleType
 
 import gymnasium as gym
 import numpy as np
@@ -16,8 +19,13 @@ class Recovery2DConfig:
     "Move the displaced cube back into the known-good recovery zone while
     avoiding unnecessary motion."
 
-    This is the first RL milestone. It trains the recovery logic cheaply before
-    we connect it back to full ManiSkill robot control.
+    reward_mode:
+        manual_dense:
+            uses the built-in dense recovery reward.
+
+        language_generated:
+            loads generated_rewards/cube_recovery_language_reward.py and uses
+            its compute_language_reward function.
     """
 
     max_episode_steps: int = 60
@@ -32,6 +40,25 @@ class Recovery2DConfig:
     success_bonus: float = 10.0
     out_of_bounds_penalty: float = 5.0
     motion_noise_std: float = 0.001
+    reward_mode: str = "manual_dense"
+    generated_reward_path: str = "generated_rewards/cube_recovery_language_reward.py"
+
+
+def _load_python_module_from_path(path: Path) -> ModuleType:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Generated reward file not found: {path}. "
+            "Run scripts/07_generate_language_reward.py first."
+        )
+
+    spec = spec_from_file_location("cube_recovery_language_reward", path)
+
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load Python module from {path}")
+
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class Recovery2DEnv(gym.Env):
@@ -61,19 +88,37 @@ class Recovery2DEnv(gym.Env):
         super().__init__()
 
         self.config = config or Recovery2DConfig()
+        self.generated_reward_module: ModuleType | None = None
+
+        if self.config.reward_mode == "language_generated":
+            self.generated_reward_module = _load_python_module_from_path(
+                Path(self.config.generated_reward_path)
+            )
+
+            if not hasattr(self.generated_reward_module, "compute_language_reward"):
+                raise AttributeError(
+                    "Generated reward module must define compute_language_reward."
+                )
+
+        valid_reward_modes = {"manual_dense", "language_generated"}
+        if self.config.reward_mode not in valid_reward_modes:
+            raise ValueError(
+                f"Invalid reward_mode={self.config.reward_mode!r}. "
+                f"Expected one of {sorted(valid_reward_modes)}."
+            )
 
         high = np.array(
             [
                 1.0,
-                1.0,  # cube xy
                 1.0,
-                1.0,  # recovery center xy
                 1.0,
-                1.0,  # task goal xy
                 1.0,
-                1.0,  # cube - recovery
                 1.0,
-                1.0,  # cube - goal
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
             ],
             dtype=np.float32,
         )
@@ -142,6 +187,47 @@ class Recovery2DEnv(gym.Env):
             > self.config.workspace_radius
         )
 
+    def _compute_reward(
+        self,
+        previous_distance: float,
+        current_distance: float,
+        action: np.ndarray,
+        is_recovered: bool,
+        is_out_of_bounds: bool,
+    ) -> float:
+        action_norm = float(np.linalg.norm(action))
+
+        if self.config.reward_mode == "manual_dense":
+            progress = previous_distance - current_distance
+
+            reward = 0.0
+            reward += -self.config.distance_weight * current_distance
+            reward += self.config.progress_weight * progress
+            reward -= self.config.action_penalty_weight * action_norm
+
+            if is_recovered:
+                reward += self.config.success_bonus
+
+            if is_out_of_bounds:
+                reward -= self.config.out_of_bounds_penalty
+
+            return float(reward)
+
+        if self.config.reward_mode == "language_generated":
+            assert self.generated_reward_module is not None
+
+            return float(
+                self.generated_reward_module.compute_language_reward(
+                    previous_distance_to_recovery=previous_distance,
+                    distance_to_recovery=current_distance,
+                    action_norm=action_norm,
+                    is_recovered=is_recovered,
+                    is_out_of_bounds=is_out_of_bounds,
+                )
+            )
+
+        raise RuntimeError(f"Unsupported reward mode: {self.config.reward_mode}")
+
     def reset(
         self,
         *,
@@ -164,6 +250,7 @@ class Recovery2DEnv(gym.Env):
             "recovery_center_xy": self.recovery_center_xy.copy(),
             "goal_xy": self.goal_xy.copy(),
             "cube_xy": self.cube_xy.copy(),
+            "reward_mode": self.config.reward_mode,
         }
 
         return self._get_obs(), info
@@ -190,21 +277,23 @@ class Recovery2DEnv(gym.Env):
         self.cube_xy = (self.cube_xy + delta + noise).astype(np.float32)
 
         current_distance = self._distance_to_recovery()
-        progress = previous_distance - current_distance
+        is_recovered = self._is_recovered()
+        is_out_of_bounds = self._is_out_of_bounds()
 
-        reward = 0.0
-        reward += -self.config.distance_weight * current_distance
-        reward += self.config.progress_weight * progress
-        reward -= self.config.action_penalty_weight * float(np.linalg.norm(action))
+        reward = self._compute_reward(
+            previous_distance=previous_distance,
+            current_distance=current_distance,
+            action=action,
+            is_recovered=is_recovered,
+            is_out_of_bounds=is_out_of_bounds,
+        )
 
         terminated = False
 
-        if self._is_recovered():
-            reward += self.config.success_bonus
+        if is_recovered:
             terminated = True
 
-        if self._is_out_of_bounds():
-            reward -= self.config.out_of_bounds_penalty
+        if is_out_of_bounds:
             terminated = True
 
         truncated = self.step_count >= self.config.max_episode_steps
@@ -213,13 +302,14 @@ class Recovery2DEnv(gym.Env):
 
         info = {
             "distance_to_recovery": current_distance,
-            "progress": progress,
-            "is_recovered": self._is_recovered(),
-            "is_out_of_bounds": self._is_out_of_bounds(),
+            "progress": previous_distance - current_distance,
+            "is_recovered": is_recovered,
+            "is_out_of_bounds": is_out_of_bounds,
             "recovery_center_xy": self.recovery_center_xy.copy(),
             "goal_xy": self.goal_xy.copy(),
             "cube_xy": self.cube_xy.copy(),
             "step_count": self.step_count,
+            "reward_mode": self.config.reward_mode,
         }
 
         return self._get_obs(), float(reward), terminated, truncated, info

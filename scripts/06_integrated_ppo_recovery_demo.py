@@ -116,7 +116,7 @@ def render_topdown_frame(
 
 
 def main() -> None:
-    model_path = Path("checkpoints/recovery_ppo_2d.zip")
+    model_path = Path("checkpoints/recovery_ppo_2d_language_generated.zip")
 
     if not model_path.exists():
         raise FileNotFoundError(
